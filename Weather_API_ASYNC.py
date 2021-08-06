@@ -7,6 +7,8 @@ from time import sleep
 from tqdm import tqdm
 from dataclasses import dataclass
 import argparse
+import asyncio
+import httpx
 
 def featureParse(i,zoneId):
     #split id into 2 parts Station and time
@@ -23,10 +25,14 @@ def featureParse(i,zoneId):
         temp = temp[0]
     return weatherPoint(zoneId, time, station, temp if temp is not None else "Not given")
 
-def apiParse(zoneId,failcount,allzones,firstzone,zonecheck):
+
+def apiParseasync(zoneId,failcount,allzones,firstzone,zonecheck,r):
     first = True
-    r = requests.get(f"https://api.weather.gov/zones/forecast/{zoneId}/observations")
-    if r.status_code != 200:
+    try:
+        if r.status_code != 200:
+            failcount += 1
+            return failcount,allzones,firstzone,zonecheck
+    except:
         failcount += 1
         return failcount,allzones,firstzone,zonecheck
     with open(f"WeatherDump/{zoneId}response.json","w+") as j:
@@ -44,75 +50,38 @@ def apiParse(zoneId,failcount,allzones,firstzone,zonecheck):
     zonecheck = False
     return failcount,allzones,firstzone,zonecheck
 
-def getDataFromAPI(ids): 
+async def getDataFromAPIasync(ids): 
     zonecheck = True
     firstzone = [] #Weather history for the first zone
     allzones = [] #Current weather of all zones
     count = 0
     failcount = 0
     
-    t = tqdm(ids,desc="APIS Called") #TQDM, For loop but with feedback
     
-    for zoneId in t: 
-        failcount,allzones,firstzone,zonecheck = apiParse(zoneId,failcount,allzones,firstzone,zonecheck)
+    async with httpx.AsyncClient() as client:
+        tasks = (client.get(f"https://api.weather.gov/zones/forecast/{zoneId}/observations") for zoneId in ids)
+        reqs = await asyncio.gather(*tasks,return_exceptions=True)
+    
+    reqs = zip(ids,reqs)
+    t = tqdm(reqs,desc="APIS Called") #TQDM, For loop but with feedback
+    for zoneId,r in t: 
+        failcount,allzones,firstzone,zonecheck = apiParseasync(zoneId,failcount,allzones,firstzone,zonecheck,r)
         if len(firstzone) < 10:
             firstzone.clear()
             zonecheck = True
-        if count > 9:
-            t.set_description(f"Sleeping for 5 seconds, {failcount = }")
-            sleep(5)
-            t.set_description("APIS called")
-            count = 0
-        else:
-            count +=1
+
             
-    with open("WeatherDump/weatherall.csv","w+",newline='') as f:
-        writer = csv.writer(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(weatherPoint.csvheader())
-        for x in allzones:
-            writer.writerow(x.csvout())
-    with open("WeatherDump/weatherone.csv","w+",newline='') as f:
-        writer = csv.writer(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        writer.writerow(weatherPoint.csvheader())
-        for x in firstzone:
-            writer.writerow(x.csvout())
+    # with open("WeatherDump/weatherall.csv","w+",newline='') as f:
+    #     writer = csv.writer(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+    #     writer.writerow(weatherPoint.csvheader())
+    #     for x in allzones:
+    #         writer.writerow(x.csvout())
+    # with open("WeatherDump/weatherone.csv","w+",newline='') as f:
+    #     writer = csv.writer(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+    #     writer.writerow(weatherPoint.csvheader())
+    #     for x in firstzone:
+    #         writer.writerow(x.csvout())
     print(f"Amount of api fails: {failcount}")
-
-
-def getDataFromFile(): 
-    firstzone = [] #Weather history for the first zone
-    allzones = [] #Current weather of all zones 
-    with open("WeatherDump/weatherall.csv","r") as f:
-        reader = csv.reader(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        skip = False
-        for row in reader:
-            if not skip:#Skip the first row
-                skip = True
-                continue
-            if len(row) == 0:
-                continue #Skip any bad rows
-            weather = weatherPoint(row[0],
-                                    row[1],
-                                    row[2],
-                                    row[3])
-            allzones.append(weather)
-
-    with open("WeatherDump/weatherone.csv","r") as f:
-        reader = csv.reader(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        skip  = False
-        for row in reader:
-            if not skip:#Skip the first row
-                skip = True
-                continue
-            if len(row) == 0:
-                continue #Skip any bad rows
-            weather = weatherPoint(row[0],
-                                    row[1],
-                                    row[2],
-                                    row[3])
-            firstzone.append(weather)
-    return allzones,firstzone
-
 
 @dataclass(frozen=True)
 class weatherPoint:
@@ -139,7 +108,7 @@ def main():
     parser.add_argument("-f","--force",action="store_true",help="Force running of api")
     args = parser.parse_args()
     STATE = "MT" if args.state is None else args.state
-    IGNORE_FILES = False if not args.force else args.force
+    IGNORE_FILES = True if not args.force else args.force
     ids = [] #IDs for weather station
 
     r = requests.get(f"https://api.weather.gov/zones?area={STATE}")
@@ -156,7 +125,7 @@ def main():
 
     if not os.path.exists("WeatherDump/weatherall.csv") or IGNORE_FILES:#only do this if we don't have a copy
         random.shuffle(ids) #Shuffle the id so that the first one is different everytime
-        getDataFromAPI(ids)
+        asyncio.run(getDataFromAPIasync(ids))
 
 
 if __name__ == "__main__":
